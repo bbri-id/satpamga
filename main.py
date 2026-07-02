@@ -1,6 +1,7 @@
 import os
 import asyncio
 import re
+import json
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -11,7 +12,7 @@ from discord.ext import commands
 import uvicorn
 
 # ==========================================
-# 1. SETUP FASTAPI, STATE & LOG STREAM
+# 1. SETUP FASTAPI, STATE & STREAM QUEUE
 # ==========================================
 app = FastAPI()
 
@@ -21,7 +22,7 @@ bot_state = {
     "status_mode": "Standby (New Messages Only)",
     "last_scan_time": "Belum pernah scan",
     "scanning_in_progress": False,
-    "progress_text": "" # Untuk menampung teks "32% Completed"
+    "progress_text": ""
 }
 
 stats_giveaway = {
@@ -31,22 +32,28 @@ stats_giveaway = {
     "Total Terdeteksi": 0
 }
 
-# Menyimpan data giveaway yang masih aktif untuk ditampilkan di UI
 active_giveaways = []
 
-log_queue = asyncio.Queue()
+# Daftar ID Channel yang mau di-exclude/dilewati saat scanning history
+EXCLUDE_CHANNEL_IDS = [
+    1515589036142493896,
+    1514896523635200002,
+    1513912852275138630,
+    1513914332721709217,
+    1513685847420047371,
+    1513685938528718848,
+    1513686147560247296,
+    1513933744916926525
+]
 
-def custom_log(text: str):
+update_queue = asyncio.Queue()
+
+def broadcast_update(log_text: str):
+    """Mengirimkan state terbaru aplikasi beserta teks log ke UI web"""
     timestamp = datetime.now(WIB).strftime("%H:%M:%S")
-    log_entry = f"[{timestamp}] {text}"
-    print(log_entry)
-    asyncio.create_task(log_queue.put(log_entry))
-
-@app.get("/", response_class=HTMLResponse)
-async def home():
-    status_color = "#43b581" if not bot_state["scanning_in_progress"] else "#faa61a"
+    full_log = f"[{timestamp}] {log_text}"
+    print(full_log)
     
-    # Render daftar giveaway yang aktif ke bentuk elemen HTML
     giveaways_html = ""
     if not active_giveaways:
         giveaways_html = "<p style='color: #888; text-align: center; font-size: 13px;'>Tidak ada giveaway aktif saat ini.</p>"
@@ -63,6 +70,22 @@ async def home():
             </div>
             """
 
+    payload = {
+        "log": full_log,
+        "status_mode": bot_state["status_mode"],
+        "last_scan_time": bot_state["last_scan_time"],
+        "scanning_in_progress": bot_state["scanning_in_progress"],
+        "progress_text": bot_state["progress_text"],
+        "stats": stats_giveaway,
+        "giveaways_html": giveaways_html
+    }
+    
+    asyncio.create_task(update_queue.put(payload))
+
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    status_color = "#43b581" if not bot_state["scanning_in_progress"] else "#faa61a"
+    
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -78,7 +101,7 @@ async def home():
             .stat-box {{ display: flex; justify-content: space-between; padding: 12px 15px; margin: 10px 0; background: #3d3d3d; border-radius: 5px; font-size: 18px; }}
             .stat-box.total {{ background: #7289da; font-weight: bold; }}
             .status {{ text-align: center; color: {status_color}; font-weight: bold; margin-top: 20px; font-size: 16px; }}
-            .progress-display {{ text-align: center; color: #faa61a; font-size: 14px; font-weight: bold; margin-top: -10px; margin-bottom: 15px; }}
+            .progress-display {{ text-align: center; color: #faa61a; font-size: 14px; font-weight: bold; margin-top: -10px; margin-bottom: 15px; display: none; }}
             
             .btn-container {{ display: flex; gap: 10px; margin-top: 25px; justify-content: center; }}
             .btn {{ padding: 12px 24px; border: none; border-radius: 5px; font-weight: bold; font-size: 14px; cursor: pointer; text-decoration: none; color: white; transition: background 0.2s; }}
@@ -86,7 +109,6 @@ async def home():
             .btn-scanall:hover {{ background-color: #e09516; }}
             button[disabled] {{ background-color: #555555 !important; cursor: not-allowed; color: #888888; }}
             
-            /* Section Giveaway Aktif */
             .section-title {{ font-size: 14px; color: #888; margin-top: 25px; margin-bottom: 8px; font-weight: bold; text-transform: uppercase; }}
             .gw-container {{ max-height: 250px; overflow-y: auto; background: #222; padding: 10px; border-radius: 5px; border: 1px solid #333; }}
             .gw-card {{ background: #2d2d2d; padding: 12px; border-radius: 5px; margin-bottom: 10px; border-left: 4px solid #43b581; }}
@@ -97,29 +119,29 @@ async def home():
             .gw-link:hover {{ text-decoration: underline; }}
 
             .terminal {{ background-color: #000000; font-family: 'Courier New', Courier, monospace; padding: 15px; border-radius: 5px; box-shadow: inset 0 0 10px #000; height: 150px; overflow-y: auto; white-space: pre-wrap; font-size: 12px; line-height: 1.5; color: #39ff14; border: 1px solid #333; margin-top: 5px; }}
-            .terminal-header {{ color: #888; font-size: 11px; margin-top: 20px; font-bottom: 5px; font-weight: bold; }}
+            .terminal-header {{ color: #888; font-size: 11px; margin-top: 20px; font-weight: bold; }}
         </style>
     </head>
     <body>
         <div class="container">
             <h1>📊 Giveaway Watcher Panel</h1>
-            <div class="last-scan">🕒 Terakhir Scan: <strong>{bot_state['last_scan_time']}</strong></div>
+            <div class="last-scan">🕒 Terakhir Scan: <strong id="val-last-scan">{bot_state['last_scan_time']}</strong></div>
             
-            <div class="stat-box"><span>📦 Fixed Reward</span> <span>{stats_giveaway['Fixed Reward']}</span></div>
-            <div class="stat-box"><span>🎲 Random Reward</span> <span>{stats_giveaway['Random Reward']}</span></div>
-            <div class="stat-box"><span>❓ Unknown Type</span> <span>{stats_giveaway['Unknown Type']}</span></div>
-            <div class="stat-box total"><span>🚀 Total Terdeteksi</span> <span>{stats_giveaway['Total Terdeteksi']}</span></div>
+            <div class="stat-box"><span>📦 Fixed Reward</span> <span id="val-fixed">{stats_giveaway['Fixed Reward']}</span></div>
+            <div class="stat-box"><span>🎲 Random Reward</span> <span id="val-random">{stats_giveaway['Random Reward']}</span></div>
+            <div class="stat-box"><span>❓ Unknown Type</span> <span id="val-unknown">{stats_giveaway['Unknown Type']}</span></div>
+            <div class="stat-box total"><span>🚀 Total Terdeteksi</span> <span id="val-total">{stats_giveaway['Total Terdeteksi']}</span></div>
             
-            <p class="status">🟢 Status Server: {bot_state['status_mode']}</p>
-            {f'<div class="progress-display">{bot_state["progress_text"]}</div>' if bot_state['scanning_in_progress'] else ''}
+            <p class="status" id="val-status">🟢 Status Server: {bot_state['status_mode']}</p>
+            <div class="progress-display" id="val-progress"></div>
             
             <div class="btn-container">
-                <button onclick="location.href='/action/scanall'" class="btn btn-scanall" {"disabled" if bot_state['scanning_in_progress'] else ""}>Scan All History Server</button>
+                <button id="btn-scan" onclick="location.href='/action/scanall'" class="btn btn-scanall">Scan All History Server</button>
             </div>
 
-            <div class="section-title">🎁 Active Giveaways Found ({len(active_giveaways)}):</div>
-            <div class="gw-container">
-                {giveaways_html}
+            <div class="section-title">🎁 Active Giveaways Found:</div>
+            <div class="gw-container" id="gw-list">
+                <p style='color: #888; text-align: center; font-size: 13px;'>Tidak ada giveaway aktif saat ini.</p>
             </div>
 
             <div class="terminal-header">📟 LIVE CONSOLE LOGS:</div>
@@ -127,21 +149,41 @@ async def home():
         </div>
 
         <script>
-            const eventSource = new EventSource("/stream-logs");
+            const eventSource = new EventSource("/stream-updates");
             const terminal = document.getElementById("log-terminal");
             let firstLog = true;
 
             eventSource.onmessage = function(event) {{
+                const data = JSON.parse(event.data);
+                
                 if (firstLog) {{
                     terminal.innerHTML = "";
                     firstLog = false;
                 }}
-                terminal.innerHTML += event.data + "\\n";
+                terminal.innerHTML += data.log + "\\n";
                 terminal.scrollTop = terminal.scrollHeight;
                 
-                // Reload halaman otomatis jika mendeteksi scanning selesai agar tabel data ter-refresh
-                if (event.data.includes("Scanning Selesai!") || event.data.includes("Sistem diubah ke mode Standby")) {{
-                    setTimeout(() => {{ location.reload(); }}, 1000);
+                document.getElementById("val-last-scan").innerText = data.last_scan_time;
+                document.getElementById("val-fixed").innerText = data.stats["Fixed Reward"];
+                document.getElementById("val-random").innerText = data.stats["Random Reward"];
+                document.getElementById("val-unknown").innerText = data.stats["Unknown Type"];
+                document.getElementById("val-total").innerText = data.stats["Total Terdeteksi"];
+                document.getElementById("val-status").innerText = "🟢 Status Server: " + data.status_mode;
+                document.getElementById("gw-list").innerHTML = data.giveaways_html;
+                
+                const progressDiv = document.getElementById("val-progress");
+                const btnScan = document.getElementById("btn-scan");
+                const statusP = document.getElementById("val-status");
+                
+                if (data.scanning_in_progress) {{
+                    progressDiv.style.display = "block";
+                    progressDiv.innerText = data.progress_text;
+                    statusP.style.color = "#faa61a";
+                    btnScan.disabled = true;
+                }} else {{
+                    progressDiv.style.display = "none";
+                    statusP.style.color = "#43b581";
+                    btnScan.disabled = false;
                 }}
             }};
         </script>
@@ -150,15 +192,15 @@ async def home():
     """
     return html_content
 
-@app.get("/stream-logs")
-async def stream_logs(request: Request):
-    async def log_generator():
+@app.get("/stream-updates")
+async def stream_updates(request: Request):
+    async def event_generator():
         while True:
             if await request.is_disconnected():
                 break
-            log_msg = await log_queue.get()
-            yield f"data: {log_msg}\n\n"
-    return StreamingResponse(log_generator(), media_type="text/event-stream")
+            payload = await update_queue.get()
+            yield f"data: {json.dumps(payload)}\n\n"
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/ping")
 async def ping():
@@ -195,29 +237,15 @@ def proses_pesan_giveaway(message):
                         stats_giveaway["Unknown Type"] += 1
                     terdeteksi = True
                     
-                    # Logika Pencarian Batas Klaim Terhadap Status Keaktifan
                     max_claims = 0
                     current_claims = 0
                     
-                    # Gunakan regex untuk membaca parameter angka "Max Claims" di dalam deskripsi embed
                     max_match = re.search(r"Max Claims:\s*(\d+)", description)
                     if max_match:
                         max_claims = int(max_match.group(1))
                     
-                    # Membaca total klik yang sudah dilakukan pada komponen tombol pesan tersebut
-                    if message.components:
-                        for action_row in message.components:
-                            for component in action_row.children:
-                                # Jika komponen tersebut adalah button bertuliskan klaim box
-                                if component.type == discord.ComponentType.button:
-                                    # Mengambil jumlah interaksi klik user pada tombol (jika data tersedia dari gateway)
-                                    pass 
-                    
-                    # Kondisi Penentuan Keaktifan: Jika klaim saat ini masih di bawah batas maksimal kuota
                     if current_claims < max_claims or max_claims == 0:
-                        claims_display = f"{current_claims}/{max_claims}" if max_claims > 0 else "Unlimited/Unknown"
-                        
-                        # Simpan ke daftar aktif jika link pesan belum terdata sebelumnya
+                        claims_display = f"{current_claims}/{max_claims}" if max_claims > 0 else "Unlimited"
                         if not any(gw['url'] == message.jump_url for gw in active_giveaways):
                             active_giveaways.append({
                                 "title": title,
@@ -229,71 +257,75 @@ def proses_pesan_giveaway(message):
 
 @bot.event
 async def on_ready():
-    custom_log(f"Selfbot Sukses Login sebagai: {bot.user.name}")
+    broadcast_update(f"Selfbot Sukses Login sebagai: {bot.user.name}")
 
-# BOT selalu standby memantau real-time setiap saat secara default
 @bot.event
 async def on_message(message):
     target_env = os.environ.get("TARGET_GUILD_ID")
     if target_env and message.guild and not bot_state["scanning_in_progress"]:
         try:
             if message.guild.id == int(target_env):
+                # Pada standby real-time tetap check apakah room dichat tersebut di-exclude atau tidak
+                if message.channel.id in EXCLUDE_CHANNEL_IDS:
+                    return
+                
                 is_giveaway = proses_pesan_giveaway(message)
                 if is_giveaway:
                     bot_state["last_scan_time"] = datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB")
-                    custom_log(f"[Standby Realtime] Terdeteksi giveaway aktif baru di #{message.channel.name}!")
+                    broadcast_update(f"[Standby] Giveaway baru tertangkap di #{message.channel.name}!")
         except ValueError:
             pass
     await bot.process_commands(message)
 
-# Fungsi Scan History dengan kalkulasi persentase (%) ruangan chat
 async def scan_history():
     target_env = os.environ.get("TARGET_GUILD_ID")
     if not target_env:
-        custom_log("[Error] TARGET_GUILD_ID belum dikonfigurasi!")
+        broadcast_update("[Error] TARGET_GUILD_ID belum dikonfigurasi!")
         return
         
     guild_id = int(target_env)
     guild = bot.get_guild(guild_id)
     if not guild:
-        custom_log(f"[Error] Server ID {guild_id} tidak ditemukan.")
+        broadcast_update(f"[Error] Server ID {guild_id} tidak ditemukan.")
         return
 
     bot_state["scanning_in_progress"] = True
     bot_state["status_mode"] = "Scanning History"
     
-    # Reset penampung data lama
     for key in stats_giveaway: stats_giveaway[key] = 0
     active_giveaways.clear()
 
-    # Menyaring text channels valid yang bisa dibaca akun kita
+    # Menyaring text channels valid DAN tidak ada di dalam daftar EXCLUDE_CHANNEL_IDS
     valid_channels = []
     for channel in guild.text_channels:
         permissions = channel.permissions_for(guild.me)
         if permissions.read_messages and permissions.read_message_history:
-            valid_channels.append(channel)
+            if channel.id not in EXCLUDE_CHANNEL_IDS:
+                valid_channels.append(channel)
+            else:
+                print(f"[System Skip] Channel #{channel.name} ({channel.id}) masuk daftar perkecualian.")
             
     total_channels = len(valid_channels)
-    custom_log(f"Memulai pemindaian riwayat di server: {guild.name} ({total_channels} text channels terdeteksi)")
+    bot_state["progress_text"] = f"Memulai pemindaian... (0/{total_channels}) | 0% Completed"
+    broadcast_update(f"Memulai riwayat scan di server: {guild.name} ({total_channels} channel aktif dipindai)")
     
     for index, channel in enumerate(valid_channels, start=1):
-        # Hitung kalkulasi matematika persentase progress penjelajahan room
         percentage = int((index / total_channels) * 100)
         bot_state["progress_text"] = f"scanning channel #{channel.name} ({index}/{total_channels}) | {percentage}% Completed"
-        custom_log(f"Scanning channel: #{channel.name} ({index}/{total_channels})")
+        broadcast_update(f"Scanning channel: #{channel.name} ({index}/{total_channels})")
         
         try:
             async for msg in channel.history(limit=None):
                 proses_pesan_giveaway(msg)
         except discord.Forbidden:
-            custom_log(f"  [Skip] Akses ditolak di channel: #{channel.name}")
+            pass
         except Exception as e:
-            custom_log(f"  [Error] Gagal membaca channel #{channel.name}: {e}")
+            broadcast_update(f"  [Error] Gagal membaca #{channel.name}: {e}")
                 
     bot_state["scanning_in_progress"] = False
     bot_state["status_mode"] = "Standby (New Messages Only)"
     bot_state["last_scan_time"] = datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB")
-    custom_log(f"Scanning Selesai! Berhasil mengumpulkan {stats_giveaway['Total Terdeteksi']} data.")
+    broadcast_update(f"Scanning Selesai! Berhasil mengumpulkan {stats_giveaway['Total Terdeteksi']} data.")
 
 # ==========================================
 # 3. RUNNER
