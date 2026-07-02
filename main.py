@@ -61,13 +61,13 @@ async def ping():
 # ==========================================
 # 2. SETUP DISCORD SELFBOT (AKUN PERSONAL)
 # ==========================================
-# Akun personal menggunakan commands.Bot biasa tanpa argumen intents wajib dari versi standar
+# Di discord.py-self, cukup gunakan parameter self_bot=True tanpa argumen intents
 bot = commands.Bot(command_prefix="self!", self_bot=True)
 
 @bot.event
 async def on_ready():
     target_env = os.environ.get("TARGET_GUILD_ID")
-    print(f"[Selfbot] Sukses Login sebagai: {bot.user.name}#{bot.user.discriminator}")
+    print(f"[Selfbot] Sukses Login sebagai: {bot.user.name}")
     print(f"[Selfbot] Memantau Server ID: {target_env}")
 
 @bot.event
@@ -79,7 +79,7 @@ async def on_message(message):
             target_guild_id = int(target_env)
             
             if message.guild.id == target_guild_id:
-                # Karena ini akun personal, message.author.bot == True mendeteksi BOT lain (seperti LionNSEX)
+                # Memeriksa apakah pengirim pesan adalah bot bernama LionNSEX
                 if message.author.bot and message.author.name == "LionNSEX":
                     if message.embeds:
                         for embed in message.embeds:
@@ -98,7 +98,7 @@ async def on_message(message):
                                     
                                 print(f"[Selfbot Log] Terdeteksi post baru. Total: {stats_giveaway['Total Terdeteksi']}")
         except ValueError:
-            print("[Selfbot Error] Nilai TARGET_GUILD_ID bukan angka yang valid!")
+            print("[Selfbot Error] Nilai TARGET_GUILD_ID di Environment Variables bukan angka!")
 
     await bot.process_commands(message)
 
@@ -113,10 +113,9 @@ async def main():
     
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
-        print("ERROR: DISCORD_TOKEN personal tidak ditemukan di Env Variables!")
+        print("ERROR: DISCORD_TOKEN tidak ditemukan di Env Variables!")
         return
 
-    # Menjalankan FastAPI server dan Discord Selfbot secara paralel
     await asyncio.gather(
         server.serve(),
         bot.start(token)
