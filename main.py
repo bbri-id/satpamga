@@ -1,6 +1,5 @@
 import os
 import asyncio
-import re
 import json
 import random
 from datetime import datetime, timedelta, timezone
@@ -40,7 +39,6 @@ EXCLUDE_CHANNEL_IDS = [
     1513933744916926525
 ]
 
-# File lokal untuk menyimpan ID giveaway yang sudah pernah diklaim sebelumnya (Persistent Storage)
 CLAIMED_FILE = "claimed_ids.txt"
 
 def load_claimed_ids():
@@ -61,7 +59,6 @@ update_queue = asyncio.Queue()
 
 def broadcast_update(log_text: str):
     """Mengirim data perubahan state terpusat ke browser UI"""
-    # Gunakan progress_text untuk menampung log aktivitas utama agar terlihat di bawah status
     bot_state["progress_text"] = log_text
     print(f"[{datetime.now(WIB).strftime('%H:%M:%S')}] {log_text}")
     
@@ -75,7 +72,7 @@ def broadcast_update(log_text: str):
                 <div class="gw-title">🎁 {gw['title']}</div>
                 <div class="gw-desc">{gw['description'].replace('\n', '<br>')}</div>
                 <div class="gw-meta">
-                    <span>🤖 Hasil: <strong style="color: #faa61a;">{gw['claim_status']}</strong></span>
+                    <span>🤖 Hasil Akun: <strong style="color: #faa61a;">{gw['claim_status']}</strong></span>
                     <a href="{gw['url']}" target="_blank" class="gw-link">Jump to Message ↗</a>
                 </div>
             </div>
@@ -199,13 +196,10 @@ async def trigger_scan_all():
 # ==========================================
 bot = commands.Bot(command_prefix="self!", self_bot=True)
 
-async def eksekusi_auto_claim(message, title, description):
-    """Fungsi pembantu untuk melakukan interaksi klik tombol acak dan membaca output server"""
+async def eksekusi_auto_claim(message, target_index):
+    """Melakukan klik tombol interaksi dan melacak output hasil klaim secara real-time"""
     global active_giveaways
     
-    status_pelacakan = "Mencoba mengklaim..."
-    
-    # Ambil daftar tombol 'Open Box' yang tersedia pada struktur pesan komponen
     tombol_boxes = []
     if message.components:
         for action_row in message.components:
@@ -214,64 +208,70 @@ async def eksekusi_auto_claim(message, title, description):
                     tombol_boxes.append(component)
 
     if not tombol_boxes:
-        status_pelacakan = "Gagal (Tombol tidak ditemukan)"
-        return status_pelacakan
+        active_giveaways[target_index]["claim_status"] = "Expired / No Buttons Found ❌"
+        broadcast_update(f"Tombol komponen kosong atau sudah kedaluwarsa pada pesan [{message.id}]")
+        return
 
-    # Pilih salah satu tombol secara acak/random sesuai instruksi
+    # Ambil tombol secara acak sesuai instruksi
     target_button = random.choice(tombol_boxes)
-    broadcast_update(f"🤖 Menekan tombol box acak pada pesan [{message.id}]...")
+    broadcast_update(f"🤖 Menekan tombol box acak pada chat ID [{message.id}]...")
 
     try:
-        # Eksekusi Trigger Interaksi Klik Tombol Server
+        # Kirim trigger klik tombol via API Gateway Discord
         await target_button.click()
         
-        # Berikan jeda waktu tunggu sekitar 2.5 detik bagi bot LionNSEX untuk memproses input & mengeluarkan respon chat
-        await asyncio.sleep(2.5)
+        # Jeda waktu pemrosesan respon server
+        await asyncio.sleep(3.0)
         
-        # Cari pesan respon terbaru dari bot target di channel yang sama
+        status_pelacakan = "Klaim Terkirim (Menunggu respon...)"
         status_ditemukan = False
-        async for reply in message.channel.history(limit=5):
+        
+        # Baca 8 history chat terakhir di channel tersebut untuk menangkap balasan bot LionNSEX
+        async for reply in message.channel.history(limit=8):
             if reply.author.bot and reply.author.name == "LionNSEX":
                 konten_respon = reply.content.lower() if reply.content else ""
                 
-                # Periksa jika ada objek embed respon interaksi
                 if reply.embeds:
                     for emb in reply.embeds:
                         if emb.description: konten_respon += " " + emb.description.lower()
                         if emb.title: konten_respon += " " + emb.title.lower()
 
-                # Cabang Analisis Output Status Respons Server
-                if "already" in konten_respon or "pernah" in konten_respon or "claimed" in konten_respon:
+                # Cek filter kecocokan string respon dari bot server target
+                if any(x in konten_respon for x in ["already", "pernah", "claimed"]):
                     status_pelacakan = "Sudah Pernah Diclaim (Skipped)"
-                    save_claimed_id(message.id) # Masukkan ke blacklist pengecualian
+                    save_claimed_id(message.id)
                     status_ditemukan = True
                     break
-                elif "zonk" in konten_respon or "empty" in konten_respon or "bukan keberuntungan" in konten_respon:
+                elif any(x in konten_respon for x in ["zonk", "empty", "bukan keberuntungan", "sayang sekali"]):
                     status_pelacakan = "Zonk / Ampas 💔"
                     status_ditemukan = True
                     break
-                elif "win" in konten_respon or "menang" in konten_respon or "success" in konten_respon:
-                    status_pelacakan = "🎉 MENANG / BERHASIL KLAIM!"
+                elif any(x in konten_respon for x in ["win", "menang", "success", "dapatkan", "received"]):
+                    status_pelacakan = "🎉 BERHASIL KLAIM / MENANG!"
                     status_ditemukan = True
                     break
                     
         if not status_ditemukan:
-            status_pelacakan = "Klaim Terkirim (Respon tidak terbaca)"
+            status_pelacakan = "Klaim Sukses Terkirim (Cek Manual)"
             
+        active_giveaways[target_index]["claim_status"] = status_pelacakan
+        broadcast_update(f"Hasil klaim box [{message.id}]: {status_pelacakan}")
+
     except discord.HTTPException as e:
-        status_pelacakan = f"Error Klik: {e.text}"
+        active_giveaways[target_index]["claim_status"] = f"Rate Limit / Error: {e.text}"
+        broadcast_update(f"⚠️ Error HTTP klik [{message.id}]: {e.text}")
     except Exception as e:
-        status_pelacakan = f"Gagal Klaim: {str(e)}"
-        
-    return status_pelacakan
+        active_giveaways[target_index]["claim_status"] = f"Gagal: {str(e)}"
+        broadcast_update(f"❌ Error sistem klik [{message.id}]: {str(e)}")
 
 def proses_pesan_giveaway(message):
     global active_giveaways
     
-    # Proteksi penyaringan: Lewati proses jika ID chat ini ada di blacklist sudah pernah diclaim
+    # KONDISI 1: Jika ID chat sudah masuk daftar blacklist pernah diclaim, langsung abaikan (Exclude)
     if message.id in ALREADY_CLAIMED_IDS:
         return False
 
+    # KONDISI 2: Cek apakah pengirim adalah bot LionNSEX dan memiliki Embed Mystery Box
     if message.author.bot and message.author.name == "LionNSEX":
         if message.embeds:
             for embed in message.embeds:
@@ -279,31 +279,20 @@ def proses_pesan_giveaway(message):
                 description = embed.description if embed.description else ""
                 
                 if "Mystery Box Giveaway" in title:
-                    max_claims = 0
-                    max_match = re.search(r"Max Claims:\s*(\d+)", description)
-                    if max_match:
-                        max_claims = int(max_match.group(1))
-                    
-                    # Deteksi Keaktifan Awal
-                    if max_claims > 0: # Dianggap aktif saat pemindaian awal
+                    # KONDISI 3: Selama di dalam pesan tersebut terdeteksi ada komponen tombolnya, anggap AKTIF!
+                    if message.components and len(message.components) > 0:
                         if not any(gw['url'] == message.jump_url for gw in active_giveaways):
-                            idx = len(active_giveaways)
+                            current_idx = len(active_giveaways)
                             
-                            # Daftarkan struktur data ke panel web
                             active_giveaways.append({
                                 "title": title,
                                 "description": description,
                                 "url": message.jump_url,
-                                "claim_status": "Memulai Klaim..."
+                                "claim_status": "Mengantre klaim..."
                             })
                             
-                            # Jalankan pekerja background async untuk mengeklik tombol secara otomatis
-                            async def background_claim_worker():
-                                hasil_output = await eksekusi_auto_claim(message, title, description)
-                                active_giveaways[idx]["claim_status"] = hasil_output
-                                broadcast_update(f"Hasil klaim box [{message.id}]: {hasil_output}")
-                                
-                            asyncio.create_task(background_claim_worker())
+                            # Picu proses klik secara async terpisah agar tidak mengganggu kecepatan looping scan history
+                            asyncio.create_task(eksekusi_auto_claim(message, current_idx))
                             return True
     return False
 
@@ -357,6 +346,8 @@ async def scan_history():
         try:
             async for msg in channel.history(limit=None):
                 proses_pesan_giveaway(msg)
+                # Jeda nafas mikro agar tidak memicu deteksi spam/rate limit API Discord
+                await asyncio.sleep(0.01)
         except discord.Forbidden:
             pass
         except Exception as e:
