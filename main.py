@@ -3,17 +3,18 @@ import asyncio
 import discord
 import uvicorn
 from discord.ext import commands
-from fastapi import FastAPI, HTMLResponse
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from upstash_redis.asyncio import Redis
 import re
 
 # 1. SETUP ENV & REDIS
-# Gunakan try-except agar bot tidak crash saat deploy pertama kali
-try:
+# Inisialisasi Redis hanya jika environment variable tersedia
+if "UPSTASH_REDIS_REST_URL" in os.environ:
     redis = Redis.from_env()
-except Exception as e:
-    print(f"Redis config missing: {e}")
+else:
     redis = None
+    print("WARNING: Redis tidak terdeteksi! Pastikan Environment Variable sudah diset di Render.")
 
 TOKENS = os.getenv("DISCORD_TOKENS", "").split(",")
 TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", 0) or 0)
@@ -46,7 +47,6 @@ class GiveawayBot(commands.Bot):
             await self.explore_ga(message)
 
     async def explore_ga(self, message):
-        # Hindari memproses ulang
         if message.id in giveaway_registry: return
         
         buttons = [c for r in message.components for c in r.children if c.type == discord.ComponentType.button]
@@ -94,6 +94,7 @@ async def main():
     config = uvicorn.Config(app, host="0.0.0.0", port=PORT)
     server = uvicorn.Server(config)
     
+    # Jalankan bot dan server secara bersamaan
     tasks = [bot.start(bot.token) for bot in bots]
     tasks.append(server.serve())
     await asyncio.gather(*tasks)
