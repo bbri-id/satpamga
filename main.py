@@ -81,20 +81,28 @@ def is_target_giveaway(message):
     if message.author.name != "LionNSEX":
         return False, []
     
-    buttons = [c for r in message.components for c in r.children if c.type == discord.ComponentType.button]
-    if not buttons:
+    valid_buttons = []
+    for r in message.components:
+        for c in r.children:
+            if c.type == discord.ComponentType.button:
+                # ANTI "START GAME" BUTTON BUG
+                if c.label and "start" in str(c.label).lower():
+                    continue
+                valid_buttons.append(c)
+                
+    if not valid_buttons:
         return False, []
         
     keywords = ["giveaway", "mystery", "box"]
     content = message.content.lower()
     if any(kw in content for kw in keywords):
-        return True, buttons
+        return True, valid_buttons
         
     for embed in message.embeds:
         title = (embed.title or "").lower()
         desc = (embed.description or "").lower()
         if any(kw in title for kw in keywords) or any(kw in desc for kw in keywords):
-            return True, buttons
+            return True, valid_buttons
             
     return False, []
 
