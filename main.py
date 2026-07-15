@@ -20,7 +20,7 @@ current_tumbal_idx = 0
 def add_log(msg):
     print(msg)
     logs.insert(0, f"> {msg}")
-    if len(logs) > 100: logs.pop()
+    if len(logs) > 50: logs.pop()
 
 class GiveawayBot(commands.Bot):
     def __init__(self, index, token):
@@ -30,34 +30,35 @@ class GiveawayBot(commands.Bot):
 
     async def on_ready(self):
         add_log(f"Akun {self.index} ({self.user.name}) Ready")
+        # Debug: Cek apakah bot benar-benar melihat servernya
+        guild = self.get_guild(TARGET_GUILD_ID)
+        if guild:
+            add_log(f"Bot mendeteksi server: {guild.name} dengan {len(guild.channels)} channel.")
+        else:
+            add_log(f"Error: Bot tidak menemukan server dengan ID {TARGET_GUILD_ID}. Pastikan ID benar dan bot sudah di dalam server!")
 
     async def full_scan(self):
-        if TARGET_GUILD_ID == 0:
-            add_log("Error: TARGET_GUILD_ID tidak ditemukan!")
-            return
-
-        try:
-            guild = await self.fetch_guild(TARGET_GUILD_ID)
-        except Exception as e:
-            add_log(f"Error: Gagal fetch guild: {e}")
+        guild = self.get_guild(TARGET_GUILD_ID)
+        if not guild:
+            add_log("Error: Bot tidak mendeteksi server ini di cache-nya!")
             return
 
         add_log(f"Scanning server {guild.name}...")
         
-        # Filter hanya channel teks dan yang bisa dibaca
-        text_channels = [c for c in guild.text_channels if c.permissions_for(guild.me).read_messages]
-        total_channels = len(text_channels)
-        add_log(f"Jumlah channel ditemukan: {total_channels}")
+        # Ambil semua channel (text dan voice), lalu filter manual
+        all_channels = guild.channels
+        text_channels = [c for c in all_channels if isinstance(c, discord.TextChannel)]
+        
+        add_log(f"Jumlah channel teks ditemukan: {len(text_channels)}")
         
         total_claimed = 0
 
         for i, channel in enumerate(text_channels):
-            percent = ((i + 1) / total_channels) * 100
-            add_log(f"Scanning channel #{channel.name} ({i+1}/{total_channels}) {percent:.1f}%")
+            add_log(f"Scanning channel #{channel.name} ({i+1}/{len(text_channels)})")
             
             try:
-                # Ambil history, jika limit=None terlalu berat, bisa diubah jadi limit=500
-                async for msg in channel.history(limit=500): 
+                # Kita coba ambil 100 pesan terakhir dulu untuk tes
+                async for msg in channel.history(limit=100): 
                     if await REDIS.sismember("claimed_gas", msg.id): continue
                     
                     buttons = [c for r in msg.components for c in r.children if c.type == discord.ComponentType.button]
