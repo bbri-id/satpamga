@@ -6,15 +6,13 @@ from discord.ext import commands
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from upstash_redis.asyncio import Redis
-import re
 
 # 1. SETUP ENV & REDIS
-# Inisialisasi Redis hanya jika environment variable tersedia
 if "UPSTASH_REDIS_REST_URL" in os.environ:
     redis = Redis.from_env()
 else:
     redis = None
-    print("WARNING: Redis tidak terdeteksi! Pastikan Environment Variable sudah diset di Render.")
+    print("WARNING: Redis tidak terdeteksi!")
 
 TOKENS = os.getenv("DISCORD_TOKENS", "").split(",")
 TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", 0) or 0)
@@ -23,7 +21,7 @@ PORT = int(os.getenv("PORT", 8000))
 app = FastAPI()
 logs = []
 current_tumbal_idx = 0
-giveaway_registry = {} # {msg_id: {"buttons": [], "winner_btn": None}}
+giveaway_registry = {} 
 
 def add_log(msg):
     print(msg)
@@ -32,7 +30,10 @@ def add_log(msg):
 
 class GiveawayBot(commands.Bot):
     def __init__(self, index, token):
-        super().__init__(command_prefix="!", self_bot=True)
+        # FIX: Menambahkan intents agar tidak error
+        intents = discord.Intents.default()
+        intents.message_content = True # Wajib agar bot bisa baca pesan
+        super().__init__(command_prefix="!", self_bot=True, intents=intents)
         self.index = index
         self.token = token
 
@@ -52,13 +53,10 @@ class GiveawayBot(commands.Bot):
         buttons = [c for r in message.components for c in r.children if c.type == discord.ComponentType.button]
         if buttons:
             giveaway_registry[message.id] = {"buttons": buttons}
-            add_log(f"Tumbal menemukan GA! Klik tombol 0...")
-            
+            add_log(f"Tumbal menemukan GA! Klik tombol...")
             try:
                 await buttons[0].click()
-                await asyncio.sleep(2.5) # Tunggu bot balas
-                
-                # Capture result
+                await asyncio.sleep(2.5)
                 result = await self.capture_result(message.channel)
                 add_log(f"RESULT: {message.embeds[0].title if message.embeds else 'GA'} > {result}")
             except Exception as e:
@@ -68,7 +66,6 @@ class GiveawayBot(commands.Bot):
         async for msg in channel.history(limit=5):
             if msg.author.name == "LionNSEX":
                 raw = (msg.content + " " + " ".join([e.description or "" for e in msg.embeds])).strip()
-                # Bersihkan pesan
                 clean = raw.replace("You already picked!", "").replace("You won!", "").strip()
                 return clean[:60]
         return "No response"
@@ -94,7 +91,6 @@ async def main():
     config = uvicorn.Config(app, host="0.0.0.0", port=PORT)
     server = uvicorn.Server(config)
     
-    # Jalankan bot dan server secara bersamaan
     tasks = [bot.start(bot.token) for bot in bots]
     tasks.append(server.serve())
     await asyncio.gather(*tasks)
