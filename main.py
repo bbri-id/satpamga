@@ -32,10 +32,11 @@ class GiveawayBot(commands.Bot):
         add_log(f"--- AKUN {self.index} ({self.user.name}) READY ---")
         guild = self.get_guild(TARGET_GUILD_ID)
         if guild:
-            add_log(f"Bot mendeteksi {len(guild.channels)} channel total. Berikut daftarnya:")
-            # Verifikasi channel untuk user
-            for c in guild.channels:
-                add_log(f"  -> {c.name} | Tipe: {c.type}")
+            # Filter hanya TextChannel untuk log
+            text_channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
+            add_log(f"Bot mendeteksi {len(text_channels)} Text Channel. Berikut daftarnya:")
+            for c in text_channels:
+                add_log(f"  -> {c.name} | Tipe: text")
         else:
             add_log(f"Error: Bot tidak menemukan server dengan ID {TARGET_GUILD_ID}.")
 
@@ -46,22 +47,26 @@ class GiveawayBot(commands.Bot):
             return
 
         add_log(f"Scanning server {guild.name}...")
+        # Hanya ambil text channels
         text_channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
         
-        add_log(f"Jumlah channel teks yang akan di-scan: {len(text_channels)}")
+        add_log(f"Total channel teks yang akan di-scan: {len(text_channels)}")
         total_claimed = 0
 
         for i, channel in enumerate(text_channels):
             add_log(f"Scanning #{channel.name} ({i+1}/{len(text_channels)})")
+            
             try:
+                # Scan 500 pesan terakhir
                 async for msg in channel.history(limit=500): 
                     if await REDIS.sismember("claimed_gas", msg.id): continue
+                    
                     buttons = [c for r in msg.components for c in r.children if c.type == discord.ComponentType.button]
                     if buttons:
                         try:
                             await buttons[0].click()
                             await REDIS.sadd("claimed_gas", msg.id)
-                            add_log(f"-> Claimed: {msg.id} di #{channel.name}")
+                            add_log(f"-> Claimed GA di #{channel.name}: {msg.id}")
                             total_claimed += 1
                             await asyncio.sleep(1.5) 
                         except Exception as e:
@@ -108,10 +113,10 @@ async def home():
         </style>
     </head>
     <body>
-        <h2>Swarm Global Scanner</h2>
+        <h2>Swarm Global Scanner (Clean)</h2>
         <div class="card">
             <select onchange="fetch('/set-tumbal?idx='+this.value)">{options}</select>
-            <button id="scanBtn" onclick="runScan()">RUN GLOBAL SCAN ALL CHANNELS</button>
+            <button id="scanBtn" onclick="runScan()">RUN GLOBAL SCAN TEXT CHANNELS</button>
             <h3 style="margin-top:20px;">Real-time Activity:</h3>
             <pre id="log-box"></pre>
         </div>
