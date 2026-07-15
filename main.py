@@ -4,10 +4,12 @@ import discord
 import uvicorn
 from discord.ext import commands
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from upstash_redis.asyncio import Redis
 
 # --- SETUP ---
+# Pastikan ENVIRONMENT VARIABLE di Render sudah diisi dengan benar:
+# DISCORD_TOKENS, TARGET_GUILD_ID, TARGET_CHANNEL_ID, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
 REDIS = Redis.from_env()
 TOKENS = os.getenv("DISCORD_TOKENS", "").split(",")
 TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", 0) or 0)
@@ -25,6 +27,7 @@ def add_log(msg):
 
 class GiveawayBot(commands.Bot):
     def __init__(self, index, token):
+        # Menggunakan discord.py-self (self_bot=True)
         super().__init__(command_prefix="!", self_bot=True)
         self.index = index
         self.token = token
@@ -33,14 +36,18 @@ class GiveawayBot(commands.Bot):
         add_log(f"Akun {self.index} ({self.user.name}) Ready")
 
     async def full_scan(self):
-        channel = self.get_channel(TARGET_CHANNEL_ID)
-        if not channel:
-            add_log("Error: Channel tidak ditemukan!")
+        """Fitur Scan Full History menggunakan fetch_channel"""
+        try:
+            # fetch_channel memaksa bot mengambil data langsung dari API, bukan cache
+            channel = await self.fetch_channel(TARGET_CHANNEL_ID)
+        except Exception as e:
+            add_log(f"Error: Gagal fetch channel {TARGET_CHANNEL_ID}: {e}")
             return
 
         add_log(f"--- STARTING FULL SCAN: {channel.name} ---")
         count = 0
         async for msg in channel.history(limit=None):
+            # Cek Redis apakah ID sudah diproses
             if await REDIS.sismember("claimed_gas", msg.id): continue
             
             buttons = [c for r in msg.components for c in r.children if c.type == discord.ComponentType.button]
@@ -50,14 +57,31 @@ class GiveawayBot(commands.Bot):
                     await REDIS.sadd("claimed_gas", msg.id)
                     add_log(f"Claimed GA: {msg.id}")
                     count += 1
-                    await asyncio.sleep(2) 
+                    await asyncio.sleep(2) # Anti-rate limit
                 except Exception as e:
                     add_log(f"Err {msg.id}: {e}")
+        
         add_log(f"SCAN SELESAI. Total Claim: {count}")
+
+    async def on_message(self, message):
+        # Real-time listener
+        if not message.guild or message.guild.id != TARGET_GUILD_ID: return
+        
+        if await REDIS.sismember("claimed_gas", message.id): return
+        
+        if message.author.name == "LionNSEX":
+            buttons = [c for r in message.components for c in r.children if c.type == discord.ComponentType.button]
+            if buttons:
+                try:
+                    await buttons[0].click()
+                    await REDIS.sadd("claimed_gas", message.id)
+                    add_log(f"Real-time GA claimed: {message.id}")
+                except Exception as e:
+                    add_log(f"Err Real-time: {e}")
 
 bots = [GiveawayBot(i, t) for i, t in enumerate(TOKENS) if t]
 
-# --- API ---
+# --- UI & API ---
 @app.get("/get-logs")
 async def get_logs():
     return {"logs": logs}
