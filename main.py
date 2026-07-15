@@ -8,12 +8,9 @@ from fastapi.responses import HTMLResponse
 from upstash_redis.asyncio import Redis
 
 # --- SETUP ---
-# Pastikan ENVIRONMENT VARIABLE di Render sudah diisi dengan benar:
-# DISCORD_TOKENS, TARGET_GUILD_ID, TARGET_CHANNEL_ID, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
 REDIS = Redis.from_env()
 TOKENS = os.getenv("DISCORD_TOKENS", "").split(",")
 TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", 0) or 0)
-TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", 0) or 0)
 PORT = int(os.getenv("PORT", 8000))
 
 app = FastAPI()
@@ -27,7 +24,6 @@ def add_log(msg):
 
 class GiveawayBot(commands.Bot):
     def __init__(self, index, token):
-        # Menggunakan discord.py-self (self_bot=True)
         super().__init__(command_prefix="!", self_bot=True)
         self.index = index
         self.token = token
@@ -36,37 +32,49 @@ class GiveawayBot(commands.Bot):
         add_log(f"Akun {self.index} ({self.user.name}) Ready")
 
     async def full_scan(self):
-        """Fitur Scan Full History menggunakan fetch_channel"""
-        try:
-            # fetch_channel memaksa bot mengambil data langsung dari API, bukan cache
-            channel = await self.fetch_channel(TARGET_CHANNEL_ID)
-        except Exception as e:
-            add_log(f"Error: Gagal fetch channel {TARGET_CHANNEL_ID}: {e}")
+        if TARGET_GUILD_ID == 0:
+            add_log("Error: TARGET_GUILD_ID tidak ditemukan di environment!")
             return
 
-        add_log(f"--- STARTING FULL SCAN: {channel.name} ---")
-        count = 0
-        async for msg in channel.history(limit=None):
-            # Cek Redis apakah ID sudah diproses
-            if await REDIS.sismember("claimed_gas", msg.id): continue
+        try:
+            # Mengambil data server (Guild) secara utuh
+            guild = await self.fetch_guild(TARGET_GUILD_ID)
+        except Exception as e:
+            add_log(f"Error: Gagal fetch guild {TARGET_GUILD_ID}: {e}. Pastikan bot sudah join server ini!")
+            return
+
+        add_log(f"--- STARTING GLOBAL SWARM SCAN: {guild.name} ---")
+        total_claimed = 0
+
+        # Loop melalui semua channel teks
+        for channel in guild.text_channels:
+            # Skip jika bot tidak punya akses baca
+            if not channel.permissions_for(guild.me).read_messages:
+                continue
+
+            add_log(f"Scanning channel: #{channel.name}")
             
-            buttons = [c for r in msg.components for c in r.children if c.type == discord.ComponentType.button]
-            if buttons:
-                try:
-                    await buttons[0].click()
-                    await REDIS.sadd("claimed_gas", msg.id)
-                    add_log(f"Claimed GA: {msg.id}")
-                    count += 1
-                    await asyncio.sleep(2) # Anti-rate limit
-                except Exception as e:
-                    add_log(f"Err {msg.id}: {e}")
+            try:
+                async for msg in channel.history(limit=None):
+                    if await REDIS.sismember("claimed_gas", msg.id): continue
+                    
+                    buttons = [c for r in msg.components for c in r.children if c.type == discord.ComponentType.button]
+                    if buttons:
+                        try:
+                            await buttons[0].click()
+                            await REDIS.sadd("claimed_gas", msg.id)
+                            add_log(f"-> Claimed GA in #{channel.name}: {msg.id}")
+                            total_claimed += 1
+                            await asyncio.sleep(2) # Delay anti rate-limit
+                        except Exception as e:
+                            add_log(f"Err clicking GA in #{channel.name}: {e}")
+            except Exception as e:
+                add_log(f"Error accessing channel #{channel.name}: {e}")
         
-        add_log(f"SCAN SELESAI. Total Claim: {count}")
+        add_log(f"GLOBAL SCAN SELESAI. Total Claim: {total_claimed}")
 
     async def on_message(self, message):
-        # Real-time listener
         if not message.guild or message.guild.id != TARGET_GUILD_ID: return
-        
         if await REDIS.sismember("claimed_gas", message.id): return
         
         if message.author.name == "LionNSEX":
@@ -75,7 +83,7 @@ class GiveawayBot(commands.Bot):
                 try:
                     await buttons[0].click()
                     await REDIS.sadd("claimed_gas", message.id)
-                    add_log(f"Real-time GA claimed: {message.id}")
+                    add_log(f"Real-time GA claimed in #{message.channel.name}")
                 except Exception as e:
                     add_log(f"Err Real-time: {e}")
 
@@ -102,18 +110,18 @@ async def home():
         </style>
     </head>
     <body>
-        <h1>Swarm Dashboard</h1>
+        <h1>Global Swarm Dashboard</h1>
         <div class="card">
             <label>Selected Account:</label>
             <select onchange="fetch('/set-tumbal?idx='+this.value)">{options}</select>
-            <button id="scanBtn" onclick="runScan()">RUN FULL SERVER SCAN</button>
+            <button id="scanBtn" onclick="runScan()">RUN GLOBAL SCAN ALL CHANNELS</button>
             <h3 style="margin-top:20px;">Live Logs:</h3>
             <pre id="log-box"></pre>
         </div>
         <script>
             function runScan() {{
                 document.getElementById('scanBtn').innerText = "Scanning...";
-                fetch('/scan').then(() => alert("Scan started in background"));
+                fetch('/scan').then(() => alert("Global scan started in background"));
             }}
             setInterval(() => {{
                 fetch('/get-logs').then(r => r.json()).then(data => {{
