@@ -20,7 +20,7 @@ current_tumbal_idx = 0
 def add_log(msg):
     print(msg)
     logs.insert(0, f"> {msg}")
-    if len(logs) > 50: logs.pop()
+    if len(logs) > 100: logs.pop()
 
 class GiveawayBot(commands.Bot):
     def __init__(self, index, token):
@@ -29,44 +29,39 @@ class GiveawayBot(commands.Bot):
         self.token = token
 
     async def on_ready(self):
-        add_log(f"Akun {self.index} ({self.user.name}) Ready")
-        # Debug: Cek apakah bot benar-benar melihat servernya
+        add_log(f"--- AKUN {self.index} ({self.user.name}) READY ---")
         guild = self.get_guild(TARGET_GUILD_ID)
         if guild:
-            add_log(f"Bot mendeteksi server: {guild.name} dengan {len(guild.channels)} channel.")
+            add_log(f"Bot mendeteksi {len(guild.channels)} channel total. Berikut daftarnya:")
+            # Verifikasi channel untuk user
+            for c in guild.channels:
+                add_log(f"  -> {c.name} | Tipe: {c.type}")
         else:
-            add_log(f"Error: Bot tidak menemukan server dengan ID {TARGET_GUILD_ID}. Pastikan ID benar dan bot sudah di dalam server!")
+            add_log(f"Error: Bot tidak menemukan server dengan ID {TARGET_GUILD_ID}.")
 
     async def full_scan(self):
         guild = self.get_guild(TARGET_GUILD_ID)
         if not guild:
-            add_log("Error: Bot tidak mendeteksi server ini di cache-nya!")
+            add_log("Error: Bot tidak mendeteksi server!")
             return
 
         add_log(f"Scanning server {guild.name}...")
+        text_channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
         
-        # Ambil semua channel (text dan voice), lalu filter manual
-        all_channels = guild.channels
-        text_channels = [c for c in all_channels if isinstance(c, discord.TextChannel)]
-        
-        add_log(f"Jumlah channel teks ditemukan: {len(text_channels)}")
-        
+        add_log(f"Jumlah channel teks yang akan di-scan: {len(text_channels)}")
         total_claimed = 0
 
         for i, channel in enumerate(text_channels):
-            add_log(f"Scanning channel #{channel.name} ({i+1}/{len(text_channels)})")
-            
+            add_log(f"Scanning #{channel.name} ({i+1}/{len(text_channels)})")
             try:
-                # Kita coba ambil 100 pesan terakhir dulu untuk tes
-                async for msg in channel.history(limit=100): 
+                async for msg in channel.history(limit=500): 
                     if await REDIS.sismember("claimed_gas", msg.id): continue
-                    
                     buttons = [c for r in msg.components for c in r.children if c.type == discord.ComponentType.button]
                     if buttons:
                         try:
                             await buttons[0].click()
                             await REDIS.sadd("claimed_gas", msg.id)
-                            add_log(f"-> Claimed GA di #{channel.name}: {msg.id}")
+                            add_log(f"-> Claimed: {msg.id} di #{channel.name}")
                             total_claimed += 1
                             await asyncio.sleep(1.5) 
                         except Exception as e:
@@ -109,7 +104,7 @@ async def home():
             .card {{ background: #1e1e1e; padding: 20px; border-radius: 8px; border: 1px solid #333; }}
             button {{ background: #4caf50; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; font-weight: bold; }}
             select {{ background: #333; color: white; padding: 8px; border-radius: 4px; width: 100%; margin-bottom: 20px; }}
-            pre {{ background: #000; color: #00ff00; padding: 15px; height: 400px; overflow-y: auto; font-size: 12px; border: 1px solid #333; }}
+            pre {{ background: #000; color: #00ff00; padding: 15px; height: 500px; overflow-y: auto; font-size: 12px; border: 1px solid #333; }}
         </style>
     </head>
     <body>
