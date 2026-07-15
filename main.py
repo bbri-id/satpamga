@@ -1,28 +1,33 @@
 import os
 import asyncio
 import discord
-from discord.ext import commands
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, StreamingResponse
 import uvicorn
+from discord.ext import commands
+from fastapi import FastAPI, HTMLResponse
 from upstash_redis.asyncio import Redis
 import re
 
-# Inisialisasi Redis (otomatis ambil dari ENV)
-redis = Redis.from_env()
+# 1. SETUP ENV & REDIS
+# Gunakan try-except agar bot tidak crash saat deploy pertama kali
+try:
+    redis = Redis.from_env()
+except Exception as e:
+    print(f"Redis config missing: {e}")
+    redis = None
 
 TOKENS = os.getenv("DISCORD_TOKENS", "").split(",")
-TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", 0))
-app = FastAPI()
+TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", 0) or 0)
+PORT = int(os.getenv("PORT", 8000))
 
-# Global State
-current_tumbal_idx = 0
+app = FastAPI()
 logs = []
-giveaway_registry = {} # {msg_id: {"buttons": [], "winner": None}}
+current_tumbal_idx = 0
+giveaway_registry = {} # {msg_id: {"buttons": [], "winner_btn": None}}
 
 def add_log(msg):
+    print(msg)
     logs.insert(0, msg)
-    if len(logs) > 20: logs.pop()
+    if len(logs) > 50: logs.pop()
 
 class GiveawayBot(commands.Bot):
     def __init__(self, index, token):
@@ -31,70 +36,67 @@ class GiveawayBot(commands.Bot):
         self.token = token
 
     async def on_ready(self):
-        add_log(f"Bot {self.index} Ready: {self.user.name}")
+        add_log(f"Akun {self.index} Logged in: {self.user.name}")
 
     async def on_message(self, message):
-        global current_tumbal_idx
         if not message.guild or message.guild.id != TARGET_GUILD_ID: return
         
-        # EXPLORER LOGIC (Hanya Tumbal)
-        if self.index == current_tumbal_idx:
-            if message.author.name == "LionNSEX":
-                await self.explore_ga(message)
-
-        # SWARM LOGIC (Semua Akun)
-        if message.author.name == "LionNSEX":
-            await self.check_win(message)
+        # LOGIC EXPLORER (HANYA TUMBAL)
+        if self.index == current_tumbal_idx and message.author.name == "LionNSEX":
+            await self.explore_ga(message)
 
     async def explore_ga(self, message):
+        # Hindari memproses ulang
         if message.id in giveaway_registry: return
         
         buttons = [c for r in message.components for c in r.children if c.type == discord.ComponentType.button]
         if buttons:
-            giveaway_registry[message.id] = {"buttons": buttons, "tried": []}
-            add_log(f"Tumbal menemukan GA! Tombol: {len(buttons)}")
-            await buttons[0].click() # Tes tombol pertama
-
-    async def check_win(self, message):
-        content = (message.content + " " + " ".join([e.description or "" for e in message.embeds])).lower()
-        
-        # Cek apakah sudah klaim
-        if await redis.sismember("claimed_ids", message.id): return
-
-        if "you got:" in content or "you won" in content:
-            # Klaim Berhasil!
-            await redis.sadd("claimed_ids", message.id)
-            add_log(f"Bot {self.index} Berhasil menang!")
+            giveaway_registry[message.id] = {"buttons": buttons}
+            add_log(f"Tumbal menemukan GA! Klik tombol 0...")
             
-        elif "already" in content:
-            # Zonk/Already - Switch tombol
-            msg_id = message.reference.message_id if message.reference else None
-            if msg_id and msg_id in giveaway_registry:
-                # Logika Barbar: Jika satu tombol zonk, semua akun hindari tombol ini
-                pass
+            try:
+                await buttons[0].click()
+                await asyncio.sleep(2.5) # Tunggu bot balas
+                
+                # Capture result
+                result = await self.capture_result(message.channel)
+                add_log(f"RESULT: {message.embeds[0].title if message.embeds else 'GA'} > {result}")
+            except Exception as e:
+                add_log(f"Error Explorer: {e}")
 
-    async def swarm_click(self, button):
-        try:
-            await button.click()
-        except Exception as e:
-            add_log(f"Error click: {e}")
+    async def capture_result(self, channel):
+        async for msg in channel.history(limit=5):
+            if msg.author.name == "LionNSEX":
+                raw = (msg.content + " " + " ".join([e.description or "" for e in msg.embeds])).strip()
+                # Bersihkan pesan
+                clean = raw.replace("You already picked!", "").replace("You won!", "").strip()
+                return clean[:60]
+        return "No response"
 
-# Inisialisasi instance
+# INIT BOTS
 bots = [GiveawayBot(i, t) for i, t in enumerate(TOKENS) if t]
 
-@app.get("/")
+# 2. WEB UI & API
+@app.get("/", response_class=HTMLResponse)
 async def home():
     options = "".join([f"<option value='{i}' {'selected' if i == current_tumbal_idx else ''}>Akun {i}</option>" for i in range(len(bots))])
-    return HTMLResponse(f"<html><body><h1>Swarm Panel</h1><select onchange='fetch(\"/set-tumbal?idx=\"+this.value)'>{options}</select><pre>{chr(10).join(logs)}</pre></body></html>")
+    return f"<html><body><h1>Swarm Panel</h1><select onchange='fetch(\"/set-tumbal?idx=\"+this.value)'>{options}</select><pre>{chr(10).join(logs)}</pre></body></html>"
 
 @app.get("/set-tumbal")
 async def set_tumbal(idx: int):
     global current_tumbal_idx
     current_tumbal_idx = idx
+    add_log(f"Tumbal diganti ke Akun {idx}")
     return {"status": "ok"}
 
+# 3. RUNNER
 async def main():
-    await asyncio.gather(*[bot.start(bot.token) for bot in bots], uvicorn.run(app, host="0.0.0.0", port=8000))
+    config = uvicorn.Config(app, host="0.0.0.0", port=PORT)
+    server = uvicorn.Server(config)
+    
+    tasks = [bot.start(bot.token) for bot in bots]
+    tasks.append(server.serve())
+    await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
     asyncio.run(main())
