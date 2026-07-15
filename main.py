@@ -20,7 +20,7 @@ current_tumbal_idx = 0
 def add_log(msg):
     print(msg)
     logs.insert(0, f"> {msg}")
-    if len(logs) > 50: logs.pop()
+    if len(logs) > 100: logs.pop()
 
 class GiveawayBot(commands.Bot):
     def __init__(self, index, token):
@@ -33,29 +33,31 @@ class GiveawayBot(commands.Bot):
 
     async def full_scan(self):
         if TARGET_GUILD_ID == 0:
-            add_log("Error: TARGET_GUILD_ID tidak ditemukan di environment!")
+            add_log("Error: TARGET_GUILD_ID tidak ditemukan!")
             return
 
         try:
-            # Mengambil data server (Guild) secara utuh
             guild = await self.fetch_guild(TARGET_GUILD_ID)
         except Exception as e:
-            add_log(f"Error: Gagal fetch guild {TARGET_GUILD_ID}: {e}. Pastikan bot sudah join server ini!")
+            add_log(f"Error: Gagal fetch guild: {e}")
             return
 
-        add_log(f"--- STARTING GLOBAL SWARM SCAN: {guild.name} ---")
+        add_log(f"Scanning server {guild.name}...")
+        
+        # Filter hanya channel teks dan yang bisa dibaca
+        text_channels = [c for c in guild.text_channels if c.permissions_for(guild.me).read_messages]
+        total_channels = len(text_channels)
+        add_log(f"Jumlah channel ditemukan: {total_channels}")
+        
         total_claimed = 0
 
-        # Loop melalui semua channel teks
-        for channel in guild.text_channels:
-            # Skip jika bot tidak punya akses baca
-            if not channel.permissions_for(guild.me).read_messages:
-                continue
-
-            add_log(f"Scanning channel: #{channel.name}")
+        for i, channel in enumerate(text_channels):
+            percent = ((i + 1) / total_channels) * 100
+            add_log(f"Scanning channel #{channel.name} ({i+1}/{total_channels}) {percent:.1f}%")
             
             try:
-                async for msg in channel.history(limit=None):
+                # Ambil history, jika limit=None terlalu berat, bisa diubah jadi limit=500
+                async for msg in channel.history(limit=500): 
                     if await REDIS.sismember("claimed_gas", msg.id): continue
                     
                     buttons = [c for r in msg.components for c in r.children if c.type == discord.ComponentType.button]
@@ -63,15 +65,15 @@ class GiveawayBot(commands.Bot):
                         try:
                             await buttons[0].click()
                             await REDIS.sadd("claimed_gas", msg.id)
-                            add_log(f"-> Claimed GA in #{channel.name}: {msg.id}")
+                            add_log(f"-> Claimed GA di #{channel.name}: {msg.id}")
                             total_claimed += 1
-                            await asyncio.sleep(2) # Delay anti rate-limit
+                            await asyncio.sleep(1.5) 
                         except Exception as e:
-                            add_log(f"Err clicking GA in #{channel.name}: {e}")
+                            add_log(f"Err click #{channel.name}: {e}")
             except Exception as e:
-                add_log(f"Error accessing channel #{channel.name}: {e}")
+                add_log(f"Err access #{channel.name}: {e}")
         
-        add_log(f"GLOBAL SCAN SELESAI. Total Claim: {total_claimed}")
+        add_log(f"SCAN SELESAI. Total {total_claimed} giveaway berhasil diklaim.")
 
     async def on_message(self, message):
         if not message.guild or message.guild.id != TARGET_GUILD_ID: return
@@ -102,26 +104,25 @@ async def home():
     <html>
     <head>
         <style>
-            body {{ background: #121212; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; margin: 40px; }}
+            body {{ background: #121212; color: #e0e0e0; font-family: monospace; margin: 20px; }}
             .card {{ background: #1e1e1e; padding: 20px; border-radius: 8px; border: 1px solid #333; }}
-            button {{ background: #cf6679; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; font-weight: bold; }}
+            button {{ background: #4caf50; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; font-weight: bold; }}
             select {{ background: #333; color: white; padding: 8px; border-radius: 4px; width: 100%; margin-bottom: 20px; }}
-            pre {{ background: #000; color: #00ff00; padding: 15px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; }}
+            pre {{ background: #000; color: #00ff00; padding: 15px; height: 400px; overflow-y: auto; font-size: 12px; border: 1px solid #333; }}
         </style>
     </head>
     <body>
-        <h1>Global Swarm Dashboard</h1>
+        <h2>Swarm Global Scanner</h2>
         <div class="card">
-            <label>Selected Account:</label>
             <select onchange="fetch('/set-tumbal?idx='+this.value)">{options}</select>
             <button id="scanBtn" onclick="runScan()">RUN GLOBAL SCAN ALL CHANNELS</button>
-            <h3 style="margin-top:20px;">Live Logs:</h3>
+            <h3 style="margin-top:20px;">Real-time Activity:</h3>
             <pre id="log-box"></pre>
         </div>
         <script>
             function runScan() {{
                 document.getElementById('scanBtn').innerText = "Scanning...";
-                fetch('/scan').then(() => alert("Global scan started in background"));
+                fetch('/scan');
             }}
             setInterval(() => {{
                 fetch('/get-logs').then(r => r.json()).then(data => {{
