@@ -4,10 +4,10 @@ import discord
 import uvicorn
 from discord.ext import commands
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from upstash_redis.asyncio import Redis
 
-# 1. SETUP
+# --- SETUP ---
 REDIS = Redis.from_env()
 TOKENS = os.getenv("DISCORD_TOKENS", "").split(",")
 TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", 0) or 0)
@@ -15,13 +15,13 @@ TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", 0) or 0)
 PORT = int(os.getenv("PORT", 8000))
 
 app = FastAPI()
-logs = []
+logs = ["System Initialized..."]
 current_tumbal_idx = 0
 
 def add_log(msg):
     print(msg)
-    logs.insert(0, f"[{msg}]")
-    if len(logs) > 100: logs.pop()
+    logs.insert(0, f"> {msg}")
+    if len(logs) > 50: logs.pop()
 
 class GiveawayBot(commands.Bot):
     def __init__(self, index, token):
@@ -33,70 +33,85 @@ class GiveawayBot(commands.Bot):
         add_log(f"Akun {self.index} ({self.user.name}) Ready")
 
     async def full_scan(self):
-        """Scan seluruh history channel & simpan ke Redis agar persisten"""
         channel = self.get_channel(TARGET_CHANNEL_ID)
         if not channel:
             add_log("Error: Channel tidak ditemukan!")
             return
 
-        add_log(f"Mulai Full Scan di {channel.name}...")
+        add_log(f"--- STARTING FULL SCAN: {channel.name} ---")
         count = 0
-        # limit=None mengambil seluruh history server
         async for msg in channel.history(limit=None):
-            # Cek di Redis apakah ID ini sudah pernah diproses
-            is_processed = await REDIS.sismember("claimed_gas", msg.id)
-            if is_processed:
-                continue
+            if await REDIS.sismember("claimed_gas", msg.id): continue
             
             buttons = [c for r in msg.components for c in r.children if c.type == discord.ComponentType.button]
             if buttons:
                 try:
                     await buttons[0].click()
-                    await REDIS.sadd("claimed_gas", msg.id) # Simpan ke Redis
-                    add_log(f"Berhasil claim GA lama: {msg.id}")
+                    await REDIS.sadd("claimed_gas", msg.id)
+                    add_log(f"Claimed GA: {msg.id}")
                     count += 1
-                    await asyncio.sleep(2) # Anti-rate limit
+                    await asyncio.sleep(2) 
                 except Exception as e:
-                    add_log(f"Err claim GA {msg.id}: {e}")
-        
-        add_log(f"Full Scan selesai. Total claim baru: {count}")
+                    add_log(f"Err {msg.id}: {e}")
+        add_log(f"SCAN SELESAI. Total Claim: {count}")
 
-    async def on_message(self, message):
-        if not message.guild or message.guild.id != TARGET_GUILD_ID: return
-        
-        # Real-time GA Detection
-        is_processed = await REDIS.sismember("claimed_gas", message.id)
-        if not is_processed and message.author.name == "LionNSEX":
-            buttons = [c for r in message.components for c in r.children if c.type == discord.ComponentType.button]
-            if buttons:
-                try:
-                    await buttons[0].click()
-                    await REDIS.sadd("claimed_gas", message.id)
-                    add_log("Real-time GA claimed.")
-                except Exception as e:
-                    add_log(f"Err: {e}")
-
-# INIT
 bots = [GiveawayBot(i, t) for i, t in enumerate(TOKENS) if t]
 
-# 2. UI
+# --- API ---
+@app.get("/get-logs")
+async def get_logs():
+    return {"logs": logs}
+
 @app.get("/", response_class=HTMLResponse)
 async def home():
     options = "".join([f"<option value='{i}' {'selected' if i == current_tumbal_idx else ''}>Akun {i}</option>" for i in range(len(bots))])
     return f"""
-    <html class="dark"><body class="bg-gray-900 text-white p-8 font-sans">
-        <h1 class="text-2xl font-bold mb-4 text-indigo-400">Swarm Persistent Dashboard</h1>
-        <div class="bg-gray-800 p-4 rounded border border-gray-700">
-            <button onclick="fetch('/scan')" class="w-full bg-red-600 hover:bg-red-500 p-3 rounded font-bold text-lg animate-pulse">RUN FULL SERVER SCAN</button>
-            <pre id="logs" class="mt-4 bg-black p-4 text-green-400 text-xs h-64 overflow-y-auto">{chr(10).join(logs)}</pre>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ background: #121212; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; margin: 40px; }}
+            .card {{ background: #1e1e1e; padding: 20px; border-radius: 8px; border: 1px solid #333; }}
+            button {{ background: #cf6679; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; font-weight: bold; }}
+            select {{ background: #333; color: white; padding: 8px; border-radius: 4px; width: 100%; margin-bottom: 20px; }}
+            pre {{ background: #000; color: #00ff00; padding: 15px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Swarm Dashboard</h1>
+        <div class="card">
+            <label>Selected Account:</label>
+            <select onchange="fetch('/set-tumbal?idx='+this.value)">{options}</select>
+            <button id="scanBtn" onclick="runScan()">RUN FULL SERVER SCAN</button>
+            <h3 style="margin-top:20px;">Live Logs:</h3>
+            <pre id="log-box"></pre>
         </div>
-    </body></html>
+        <script>
+            function runScan() {{
+                document.getElementById('scanBtn').innerText = "Scanning...";
+                fetch('/scan').then(() => alert("Scan started in background"));
+            }}
+            setInterval(() => {{
+                fetch('/get-logs').then(r => r.json()).then(data => {{
+                    document.getElementById('log-box').innerText = data.logs.join('\\n');
+                }});
+            }}, 1000);
+        </script>
+    </body>
+    </html>
     """
 
 @app.get("/scan")
 async def trigger_scan():
     asyncio.create_task(bots[current_tumbal_idx].full_scan())
     return {"status": "scanning"}
+
+@app.get("/set-tumbal")
+async def set_tumbal(idx: int):
+    global current_tumbal_idx
+    current_tumbal_idx = idx
+    add_log(f"Switched to Acc {idx}")
+    return {"status": "ok"}
 
 async def main():
     config = uvicorn.Config(app, host="0.0.0.0", port=PORT)
