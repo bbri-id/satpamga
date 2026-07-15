@@ -7,93 +7,100 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from upstash_redis.asyncio import Redis
 
-# 1. SETUP ENV & REDIS
-if "UPSTASH_REDIS_REST_URL" in os.environ:
-    redis = Redis.from_env()
-else:
-    redis = None
-    print("WARNING: Redis tidak terdeteksi!")
-
+# 1. SETUP
+REDIS = Redis.from_env()
 TOKENS = os.getenv("DISCORD_TOKENS", "").split(",")
 TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", 0) or 0)
+TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", 0) or 0)
 PORT = int(os.getenv("PORT", 8000))
 
 app = FastAPI()
 logs = []
 current_tumbal_idx = 0
-giveaway_registry = {} 
 
 def add_log(msg):
     print(msg)
-    logs.insert(0, msg)
-    if len(logs) > 50: logs.pop()
+    logs.insert(0, f"[{msg}]")
+    if len(logs) > 100: logs.pop()
 
 class GiveawayBot(commands.Bot):
     def __init__(self, index, token):
-        # discord.py-self tidak butuh deklarasi intents manual
         super().__init__(command_prefix="!", self_bot=True)
         self.index = index
         self.token = token
 
     async def on_ready(self):
-        add_log(f"Akun {self.index} Logged in: {self.user.name}")
+        add_log(f"Akun {self.index} ({self.user.name}) Ready")
+
+    async def full_scan(self):
+        """Scan seluruh history channel & simpan ke Redis agar persisten"""
+        channel = self.get_channel(TARGET_CHANNEL_ID)
+        if not channel:
+            add_log("Error: Channel tidak ditemukan!")
+            return
+
+        add_log(f"Mulai Full Scan di {channel.name}...")
+        count = 0
+        # limit=None mengambil seluruh history server
+        async for msg in channel.history(limit=None):
+            # Cek di Redis apakah ID ini sudah pernah diproses
+            is_processed = await REDIS.sismember("claimed_gas", msg.id)
+            if is_processed:
+                continue
+            
+            buttons = [c for r in msg.components for c in r.children if c.type == discord.ComponentType.button]
+            if buttons:
+                try:
+                    await buttons[0].click()
+                    await REDIS.sadd("claimed_gas", msg.id) # Simpan ke Redis
+                    add_log(f"Berhasil claim GA lama: {msg.id}")
+                    count += 1
+                    await asyncio.sleep(2) # Anti-rate limit
+                except Exception as e:
+                    add_log(f"Err claim GA {msg.id}: {e}")
+        
+        add_log(f"Full Scan selesai. Total claim baru: {count}")
 
     async def on_message(self, message):
         if not message.guild or message.guild.id != TARGET_GUILD_ID: return
         
-        # LOGIC EXPLORER (HANYA TUMBAL)
-        if self.index == current_tumbal_idx and message.author.name == "LionNSEX":
-            await self.explore_ga(message)
+        # Real-time GA Detection
+        is_processed = await REDIS.sismember("claimed_gas", message.id)
+        if not is_processed and message.author.name == "LionNSEX":
+            buttons = [c for r in message.components for c in r.children if c.type == discord.ComponentType.button]
+            if buttons:
+                try:
+                    await buttons[0].click()
+                    await REDIS.sadd("claimed_gas", message.id)
+                    add_log("Real-time GA claimed.")
+                except Exception as e:
+                    add_log(f"Err: {e}")
 
-    async def explore_ga(self, message):
-        if message.id in giveaway_registry: return
-        
-        # Cari tombol
-        buttons = [c for r in message.components for c in r.children if c.type == discord.ComponentType.button]
-        if buttons:
-            giveaway_registry[message.id] = {"buttons": buttons}
-            add_log(f"Tumbal menemukan GA! Klik tombol...")
-            try:
-                await buttons[0].click()
-                await asyncio.sleep(2.5) # Tunggu bot balas
-                
-                # Capture result
-                result = await self.capture_result(message.channel)
-                add_log(f"RESULT: {message.embeds[0].title if message.embeds else 'GA'} > {result}")
-            except Exception as e:
-                add_log(f"Error Explorer: {e}")
-
-    async def capture_result(self, channel):
-        async for msg in channel.history(limit=5):
-            if msg.author.name == "LionNSEX":
-                raw = (msg.content + " " + " ".join([e.description or "" for e in msg.embeds])).strip()
-                # Bersihkan pesan
-                clean = raw.replace("You already picked!", "").replace("You won!", "").strip()
-                return clean[:60]
-        return "No response"
-
-# INIT BOTS
+# INIT
 bots = [GiveawayBot(i, t) for i, t in enumerate(TOKENS) if t]
 
-# 2. WEB UI & API
+# 2. UI
 @app.get("/", response_class=HTMLResponse)
 async def home():
     options = "".join([f"<option value='{i}' {'selected' if i == current_tumbal_idx else ''}>Akun {i}</option>" for i in range(len(bots))])
-    return f"<html><body><h1>Swarm Panel</h1><select onchange='fetch(\"/set-tumbal?idx=\"+this.value)'>{options}</select><pre>{chr(10).join(logs)}</pre></body></html>"
+    return f"""
+    <html class="dark"><body class="bg-gray-900 text-white p-8 font-sans">
+        <h1 class="text-2xl font-bold mb-4 text-indigo-400">Swarm Persistent Dashboard</h1>
+        <div class="bg-gray-800 p-4 rounded border border-gray-700">
+            <button onclick="fetch('/scan')" class="w-full bg-red-600 hover:bg-red-500 p-3 rounded font-bold text-lg animate-pulse">RUN FULL SERVER SCAN</button>
+            <pre id="logs" class="mt-4 bg-black p-4 text-green-400 text-xs h-64 overflow-y-auto">{chr(10).join(logs)}</pre>
+        </div>
+    </body></html>
+    """
 
-@app.get("/set-tumbal")
-async def set_tumbal(idx: int):
-    global current_tumbal_idx
-    current_tumbal_idx = idx
-    add_log(f"Tumbal diganti ke Akun {idx}")
-    return {"status": "ok"}
+@app.get("/scan")
+async def trigger_scan():
+    asyncio.create_task(bots[current_tumbal_idx].full_scan())
+    return {"status": "scanning"}
 
-# 3. RUNNER
 async def main():
     config = uvicorn.Config(app, host="0.0.0.0", port=PORT)
     server = uvicorn.Server(config)
-    
-    # Jalankan bot dan server secara bersamaan
     tasks = [bot.start(bot.token) for bot in bots]
     tasks.append(server.serve())
     await asyncio.gather(*tasks)
