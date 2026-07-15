@@ -20,8 +20,9 @@ app = FastAPI()
 
 # --- STATE VARIABLES ---
 scan_active = False
-scan_summary = [] # Untuk menyimpan data laporan scan
+scan_summary = []
 processing_lock = set()
+logs = ["System Initialized... Menunggu perintah."]
 
 # Konversi Waktu Lokal
 HARI = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
@@ -29,6 +30,12 @@ BULAN = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Ags", "Sep", "Okt", "
 
 def format_time_id(dt):
     return f"{HARI[dt.weekday()]}, {dt.day} {BULAN[dt.month - 1]} {dt.year} {dt.strftime('%H:%M')}"
+
+def add_log(msg):
+    print(msg)
+    time_str = datetime.now().strftime("%H:%M:%S")
+    logs.insert(0, f"[{time_str}] > {msg}")
+    if len(logs) > 100: logs.pop()
 
 # --- DISCORD BOT CLASS ---
 class GiveawayBot(commands.Bot):
@@ -41,10 +48,10 @@ class GiveawayBot(commands.Bot):
         self.interaction_event = asyncio.Event()
 
     async def on_ready(self):
-        print(f"[{self.role}] Akun {self.index} ({self.user.name}) Ready")
+        add_log(f"[{self.role}] Akun {self.index} ({self.user.name}) Ready")
 
     async def on_message(self, message):
-        # 1. PENANGKAP HASIL CLICKS (SIMPAN OBJEK MESSAGE SEUTUHNYA)
+        # 1. PENANGKAP HASIL CLICKS
         if message.author.name == "LionNSEX":
             is_target = False
             if message.interaction and message.interaction.user == self.user:
@@ -55,10 +62,10 @@ class GiveawayBot(commands.Bot):
                 is_target = True
             
             if is_target:
-                self.last_interaction = message # Simpan objek, bukan cuma teks
+                self.last_interaction = message 
                 self.interaction_event.set()
 
-        # 2. LIVE TRACKER TRIGGER (Hanya MAIN Bot yang jadi mandor)
+        # 2. LIVE TRACKER TRIGGER
         if self.role == "MAIN" and message.guild and message.guild.id == TARGET_GUILD_ID:
             is_valid, buttons = is_target_giveaway(message)
             if is_valid:
@@ -93,16 +100,13 @@ def is_target_giveaway(message):
 
 # --- EVALUATOR PESAN BALASAN ---
 def evaluate_response(msg):
-    """Mengevaluasi pesan balasan (ephemeral) untuk menentukan status ZONK / WIN / EXHAUSTED"""
     if not msg: return "timeout"
     
     content = msg.content.lower()
     
-    # 1. Syarat ZONK / TRAP
     if "zonk" in content or "trap" in content or "http" in content:
         return "zonk"
     
-    # Cek gambar/attachment (Trap monyet dll)
     if msg.attachments:
         return "zonk"
     for embed in msg.embeds:
@@ -112,15 +116,12 @@ def evaluate_response(msg):
         if "http" in embed_desc or "trap" in embed_desc:
             return "zonk"
             
-    # 2. Syarat ALREADY CLAIMED
     if "kamu sudah klaim" in content or "already picked" in content:
         return "already_claimed"
         
-    # 3. Syarat LIMIT / HABIS
     if "limit" in content or "full" in content or "max" in content:
         return "exhausted"
         
-    # Jika tidak ada indikasi zonk/limit, kembalikan teks aslinya sebagai nama hadiah
     return msg.content
 
 # --- LOGIKA SWARM (MINESWEEPER) ---
@@ -141,6 +142,7 @@ async def process_giveaway(message, buttons, source="SCAN"):
     if await REDIS.hexists(f"giveaway:{message.id}", "result"): return
 
     processing_lock.add(message.id)
+    add_log(f"[{source}] Menemukan GA: {message.id}. Memulai eksekusi...")
 
     available_tumbals = list(tumbal_bots)
     random.shuffle(available_tumbals)
@@ -148,7 +150,6 @@ async def process_giveaway(message, buttons, source="SCAN"):
     ga_resolved = False
     final_result = "unknown"
     
-    # Menyiapkan data laporan untuk Web UI
     report_data = {
         "link": message.jump_url,
         "time": format_time_id(message.created_at),
@@ -158,57 +159,46 @@ async def process_giveaway(message, buttons, source="SCAN"):
     for i, button in enumerate(buttons):
         button_safe = False
         
-        # FASE 1: VANGUARD TEST
         while available_tumbals:
             vanguard = available_tumbals.pop(0)
             res = await click_and_wait(vanguard, button)
             report_data["results"].append({"name": f"[Tumbal] {vanguard.user.name}", "res": res})
             
             if res == "zonk":
-                break # Zonk! Tombol ini hangus, ganti tombol berikutnya.
+                break 
             elif res == "already_claimed":
-                # Tumbal ini sudah pernah klaim, kita BUTUH tumbal lain untuk ngetes tombol ini!
                 continue 
             elif res == "exhausted":
-                break # Tombol habis
+                break 
             elif res == "timeout" or res == "error":
-                continue # Skip error, coba tumbal lain
+                continue 
             else:
-                # AMAN!
                 button_safe = True
                 break
                 
         if not available_tumbals and not button_safe:
-            # Tumbal habis sebelum menemukan tombol aman
             break
 
-        # FASE 2: AKUN UTAMA EKSEKUSI
         if button_safe:
             main_res = await click_and_wait(main_bot, button)
             report_data["results"].insert(0, {"name": f"[UTAMA] {main_bot.user.name}", "res": main_res})
 
-            if main_res == "zonk":
-                # Jika kecolongan zonk
-                continue
-            elif main_res == "already_claimed" or main_res == "exhausted":
-                continue # Cari tombol lain
+            if main_res == "zonk" or main_res == "already_claimed" or main_res == "exhausted":
+                continue 
             else:
                 final_result = main_res
                 ga_resolved = True
                 
-                # FASE 3: STEALTH FREE-FOR-ALL
                 ffa_tasks = []
                 for t_bot in available_tumbals:
                     jitter = random.uniform(0.5, 2.5)
                     ffa_tasks.append(delayed_click(t_bot, button, jitter, report_data))
                 
-                # Tunggu semua FFA selesai agar laporannya komplit
                 if ffa_tasks:
                     await asyncio.gather(*ffa_tasks)
                 
-                break # Selesai, Akun utama sudah dapat hadiah!
+                break 
 
-    # Simpan Checkpoint ke Redis
     if ga_resolved or final_result != "unknown":
         await REDIS.hset(f"giveaway:{message.id}", mapping={
             "channel_id": str(message.channel.id),
@@ -218,9 +208,9 @@ async def process_giveaway(message, buttons, source="SCAN"):
         if source == "LIVE":
             await REDIS.set("system:last_live_claim", str(datetime.now().timestamp()))
             
-    # Masukkan ke summary jika berasal dari SCAN
     if source == "SCAN" and len(report_data["results"]) > 0:
         scan_summary.append(report_data)
+        add_log(f"[{source}] GA {message.id} selesai. Ditambahkan ke report.")
     
     processing_lock.discard(message.id)
 
@@ -238,50 +228,67 @@ async def delayed_click(bot, button, delay, report_data):
 
 async def run_full_scan():
     global scan_active, scan_summary
-    if not main_bot or scan_active: return
+    if not main_bot: 
+        add_log("Error: Bot utama (MAIN_TOKEN) tidak terbaca/belum siap!")
+        return
+    if scan_active: 
+        add_log("Scan sedang berjalan, harap tunggu.")
+        return
     
     scan_active = True
-    scan_summary = [] # Reset laporan
+    scan_summary = [] 
+    scan_finished_text = "Scan Selesai! 0 GA baru ditemukan." # Default text
     
-    guild = main_bot.get_guild(TARGET_GUILD_ID)
-    if not guild:
-        scan_active = False
-        return
+    try:
+        guild = main_bot.get_guild(TARGET_GUILD_ID)
+        if not guild:
+            add_log(f"Error: Tidak dapat menemukan server dengan ID {TARGET_GUILD_ID}")
+            scan_finished_text = "Error: Guild tidak ditemukan."
+            return
 
-    await REDIS.set("system:last_full_scan", str(datetime.now().timestamp()))
-    
-    cache_key = f"guild_channels:{TARGET_GUILD_ID}"
-    channel_ids = await REDIS.smembers(cache_key)
-    
-    if not channel_ids:
-        text_channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
-        for c in text_channels: await REDIS.sadd(cache_key, c.id)
-        channel_ids = [str(c.id) for c in text_channels]
+        add_log(f"Memulai Full Scan di server: {guild.name}")
+        await REDIS.set("system:last_full_scan", str(datetime.now().timestamp()))
+        
+        cache_key = f"guild_channels:{TARGET_GUILD_ID}"
+        channel_ids = await REDIS.smembers(cache_key)
+        
+        if not channel_ids:
+            text_channels = [c for c in guild.channels if isinstance(c, discord.TextChannel)]
+            for c in text_channels: await REDIS.sadd(cache_key, c.id)
+            channel_ids = [str(c.id) for c in text_channels]
 
-    for ch_id in channel_ids:
-        channel = main_bot.get_channel(int(ch_id))
-        if not channel:
-            try: channel = await main_bot.fetch_channel(int(ch_id))
-            except: continue
+        add_log(f"Total {len(channel_ids)} channel siap di-scan.")
 
-        try:
-            async for msg in channel.history(limit=500):
-                # CEK REDIS CHECKPOINT
-                if await REDIS.hexists(f"giveaway:{msg.id}", "result"):
-                    break # Langsung stop scan channel ini
+        for ch_id in channel_ids:
+            channel = main_bot.get_channel(int(ch_id))
+            if not channel:
+                try: channel = await main_bot.fetch_channel(int(ch_id))
+                except: continue
+
+            add_log(f"Menyapu channel: #{channel.name}...")
+            try:
+                async for msg in channel.history(limit=500):
+                    if await REDIS.hexists(f"giveaway:{msg.id}", "result"):
+                        add_log(f"Tembok Checkpoint tercapai di #{channel.name} (GA lama). Stop scan channel ini.")
+                        break 
+                    
+                    is_valid, buttons = is_target_giveaway(msg)
+                    if is_valid:
+                        await process_giveaway(msg, buttons, "SCAN")
+                            
+            except discord.errors.Forbidden:
+                add_log(f"Skipped #{channel.name} (403 Forbidden - Missing Access)")
+                continue
+            except Exception as e:
+                add_log(f"Error di #{channel.name}: {str(e)}")
+                continue
                 
-                is_valid, buttons = is_target_giveaway(msg)
-                if is_valid:
-                    await process_giveaway(msg, buttons, "SCAN")
-                        
-        except discord.errors.Forbidden:
-            # BUG FIX: Handle 403 Forbidden secara spesifik
-            print(f"Skipping channel #{channel.name} due to Missing Access (403).")
-            continue
-        except Exception as e:
-            continue
+        if len(scan_summary) > 0:
+            scan_finished_text = f"Scan Selesai! {len(scan_summary)} GA diproses."
             
-    scan_active = False
+    finally:
+        scan_active = False
+        add_log(scan_finished_text)
 
 
 # --- UI & API ROUTER ---
@@ -290,7 +297,8 @@ async def get_summary():
     return {
         "is_scanning": scan_active,
         "total": len(scan_summary),
-        "results": scan_summary
+        "results": scan_summary,
+        "logs": logs
     }
 
 @app.get("/", response_class=HTMLResponse)
@@ -303,7 +311,7 @@ async def home():
         <style>
             body {{ background: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; }}
             .card {{ background: #1e1e1e; padding: 20px; border-radius: 8px; border: 1px solid #333; }}
-            button {{ background: #4caf50; color: white; border: none; padding: 12px 20px; cursor: pointer; border-radius: 4px; font-weight: bold; width: 100%; font-size: 16px; }}
+            button {{ background: #4caf50; color: white; border: none; padding: 12px 20px; cursor: pointer; border-radius: 4px; font-weight: bold; width: 100%; font-size: 16px; margin-bottom: 10px; }}
             button:disabled {{ background: #555; cursor: not-allowed; }}
             .info-box {{ display: flex; justify-content: space-between; margin-bottom: 20px; background: #222; padding: 15px; border-radius: 4px; border-left: 4px solid #4caf50; font-size: 14px; }}
             .ga-card {{ background: #2a2a2a; padding: 15px; margin-top: 15px; border-radius: 6px; border-left: 4px solid #cf6679; }}
@@ -312,11 +320,14 @@ async def home():
             .ga-date {{ color: #999; font-size: 13px; margin-bottom: 10px; display: block; }}
             .res-list {{ margin: 0; padding-left: 20px; font-family: monospace; font-size: 14px; }}
             .res-item {{ padding: 3px 0; }}
-            .status-text {{ font-weight: bold; color: #ffeb3b; margin-top: 20px; text-align: center; }}
+            .status-text {{ font-weight: bold; color: #ffeb3b; text-align: center; margin-bottom: 20px; }}
+            .layout {{ display: flex; gap: 20px; }}
+            .col {{ flex: 1; }}
+            pre {{ background: #000; color: #00ff00; padding: 15px; height: 500px; overflow-y: auto; font-size: 12px; border: 1px solid #333; border-radius: 6px; font-family: monospace; }}
         </style>
     </head>
     <body>
-        <h2>Minesweeper Scan Report</h2>
+        <h2>Minesweeper Global Command</h2>
         <div class="card">
             <div class="info-box">
                 <div><strong>Main Account:</strong> {main_bot.user.name if main_bot and main_bot.user else "Loading..."}</div>
@@ -324,10 +335,19 @@ async def home():
             </div>
             
             <button id="scanBtn" onclick="runScan()">RUN FULL SCAN</button>
-            <div id="statusIndicator" class="status-text"></div>
+            <div id="statusIndicator" class="status-text">Menunggu perintah...</div>
             
-            <div id="reportContainer" style="margin-top: 20px;">
-                <!-- Hasil scan akan muncul disini -->
+            <div class="layout">
+                <div class="col">
+                    <h3>Summary Scan (Hasil)</h3>
+                    <div id="reportContainer">
+                        <!-- Hasil scan akan muncul disini -->
+                    </div>
+                </div>
+                <div class="col">
+                    <h3>Live System Logs</h3>
+                    <pre id="log-box"></pre>
+                </div>
             </div>
         </div>
 
@@ -342,7 +362,11 @@ async def home():
                     const btn = document.getElementById('scanBtn');
                     const status = document.getElementById('statusIndicator');
                     const container = document.getElementById('reportContainer');
+                    const logBox = document.getElementById('log-box');
                     
+                    // Render Logs
+                    logBox.innerText = data.logs.join('\\n');
+
                     if (data.is_scanning) {{
                         btn.disabled = true;
                         btn.innerText = "SCANNING IN PROGRESS...";
@@ -350,11 +374,18 @@ async def home():
                     }} else {{
                         btn.disabled = false;
                         btn.innerText = "RUN FULL SCAN";
-                        status.innerText = data.total > 0 ? `Scan Selesai! Total ada ${{data.total}} GA Active yang diproses.` : "Menunggu perintah scan...";
+                        if(data.total > 0) {{
+                            status.innerText = `Scan Selesai! Total ada ${{data.total}} GA Active yang diproses.`;
+                        }} else {{
+                            status.innerText = "Scan Selesai! 0 GA baru ditemukan (Atau semua mentok di Checkpoint).";
+                        }}
                     }}
 
                     // Render list
                     container.innerHTML = "";
+                    if(data.results.length === 0 && !data.is_scanning) {{
+                        container.innerHTML = "<div style='color:#777; font-style:italic;'>Belum ada data summary di sesi ini.</div>";
+                    }}
                     data.results.forEach((ga, index) => {{
                         let liHTML = "";
                         ga.results.forEach((res, idx) => {{
@@ -372,9 +403,8 @@ async def home():
                 }});
             }}
 
-            // Auto-refresh setiap 2 detik
-            setInterval(renderState, 2000);
-            renderState(); // Load pertama kali
+            setInterval(renderState, 1000);
+            renderState(); 
         </script>
     </body>
     </html>
